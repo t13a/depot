@@ -43,7 +43,7 @@ Then these files are created.
                 └── depot-url
 ```
 
-To add your own dependencies, edit manifest file (.depot.yaml`) like following. Any URL resources or Git repositories are supported. Currently there is no mechanism to prevent inconsistency due to updating of Depot itself, so please write down the item of Depot at the end.
+To add your own dependencies, edit manifest file (`.depot.yaml`) like following. Any URL resources or Git repositories are supported. Currently there is no mechanism to prevent inconsistency due to updating of Depot itself, so please write down the item of Depot at the end.
 
 ```yaml
 api: v1alpha1
@@ -67,7 +67,7 @@ sync:
     branch: master
 ```
 
-To apply manifest file, execute following command:
+To apply manifest file, execute `run` command:
 
 ```sh
 $ vendor/github.com/t13a/depot/depot run .depot.yaml
