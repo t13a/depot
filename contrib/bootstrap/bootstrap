@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+function abort_if_exists() {
+    [ -e "${1}" ] || return 0
+    echo "${1}: already exists" >&2
+    exit 1
+}
+
+function path() {
+    script | python - path "${@}"
+}
+
+function script() {
+    if [ -z "${SCRIPT:-}" ]
+    then
+        local http_status="$(curl -IL "${SCRIPT_URL}" | head -n1 | tr -d '\r')"
+        if [ "${http_status}" != 'HTTP/1.1 200 OK' ]
+        then
+            echo "${http_status}: unexpected HTTP status" >&2
+            return 1
+        fi
+        SCRIPT="$(curl -L "${SCRIPT_URL}")"
+    fi
+    echo "${SCRIPT}"
+}
+
+REPO="${REPO:-https://github.com/t13a/depot}"
+BRANCH="${BRANCH:-master}"
+SCRIPT_URL="${SCRIPT_URL:-${REPO}/blob/${BRANCH}/depot}"
+CLONE_DIR=".depot/vendor/$(path hostpath "${REPO}")"
+CHECKOUT_DIR="vendor/$(path hostpath "${REPO}")"
+
+abort_if_exists "${CLONE_DIR}"
+abort_if_exists "${CHECKOUT_DIR}"
+abort_if_exists .depot.yaml
+abort_if_exists .gitignore
+
+mkdir -p "${CLONE_DIR}" "${CHECKOUT_DIR}"
+
+git clone --no-checkout "${REPO}" "${CLONE_DIR}"
+
+git --git-dir="${CLONE_DIR}/.git" --work-tree="${CHECKOUT_DIR}" checkout "${BRANCH}"
+
+cat << EOF > .depot.yaml
+api: v1alpha1
+dir: vendor
+env:
+  DEPOT_GIT_CLONE_DIR_PREFIX: ../.depot/vendor/
+  DEPOT_GIT_PATH_FORMAT: hostpath
+sync:
+- git:
+    repo: ${REPO}
+    branch: ${BRANCH}
+EOF
+
+cat << EOF > .gitignore
+.depot
+EOF

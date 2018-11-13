@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+function enumerate() {
+    local index=0
+    while true
+    do
+        local name="${1}${index}"
+        [ -v "${name}" ] || break
+        local value="${!name}"
+        eval "${@:2}"
+        index=$((${index} + 1))
+    done
+}
+
+function is_git_dir() {
+    [ "${DEPOT_DRY_RUN}" == yes ] && return 1
+    (
+        cd "${1}"
+        test "$(git rev-parse --git-dir)" == .
+    )
+}
+
+function log() {
+    "${DEPOT_BIN}" \
+    --log-level="${DEPOT_LOG_LEVEL}" \
+    --log-name="${DEPOT_LOG_NAME}" \
+    log \
+    "${1}" \
+    "${*:2}"
+}
+
+function path() {
+    "${DEPOT_BIN}" path "${DEPOT_URL_PATH_FORMAT:-basename}" "${1}"
+}
+
+function run() {
+    log TRACE "${*}"
+    [ "${DEPOT_DRY_RUN}" == yes ] || "${@}"
+}
+
+# replace environment variables
+export DEPOT_GIT_BRANCH="$(echo "${DEPOT_GIT_BRANCH:-}" | envsubst)"
+export DEPOT_GIT_CHECKOUT_DIR="$(echo "${DEPOT_GIT_CHECKOUT_DIR:-}" | envsubst)"
+export DEPOT_GIT_CHECKOUT_DIR_PREFIX="$(echo "${DEPOT_GIT_CHECKOUT_DIR_PREFIX:-}" | envsubst)"
+export DEPOT_GIT_CHECKOUT_DIR_SUFFIX="$(echo "${DEPOT_GIT_CHECKOUT_DIR_SUFFIX:-}" | envsubst)"
+export DEPOT_GIT_CLONE_DIR="$(echo "${DEPOT_GIT_CLONE_DIR:-}" | envsubst)"
+export DEPOT_GIT_CLONE_DIR_PREFIX="$(echo "${DEPOT_GIT_CLONE_DIR_PREFIX:-}" | envsubst)"
+export DEPOT_GIT_CLONE_DIR_SUFFIX="$(echo "${DEPOT_GIT_CLONE_DIR_SUFFIX:-}" | envsubst)"
+export DEPOT_GIT_PATH_FORMAT="$(echo "${DEPOT_GIT_PATH_FORMAT:-}" | envsubst)"
+export DEPOT_GIT_REPO="$(echo "${DEPOT_GIT_REPO}" | envsubst)"
+enumerate DEPOT_GIT_PATHS_ 'export "${name}=$(echo "${value}" | envsubst)"'
+log TRACE "$(env | grep '^DEPOT_' | sort)"
+
+# prepare variables
+REPO="${DEPOT_GIT_REPO}"
+BRANCH="${DEPOT_GIT_BRANCH:-}"
+CLONE_DIR="$(
+    printf '%s/%s%s%s' \
+    "${DEPOT_DIR}" \
+    "${DEPOT_GIT_CLONE_DIR_PREFIX}" \
+    "${DEPOT_GIT_CLONE_DIR:-$(path "${REPO}")}" \
+    "${DEPOT_GIT_CLONE_DIR_SUFFIX}"
+)"
+CHECKOUT_DIR="$(
+    printf '%s/%s%s%s' \
+    "${DEPOT_DIR}" \
+    "${DEPOT_GIT_CHECKOUT_DIR_PREFIX}" \
+    "${DEPOT_GIT_CHECKOUT_DIR:-$(path "${REPO}")}" \
+    "${DEPOT_GIT_CHECKOUT_DIR_SUFFIX}"
+)"
+PATHS=()
+enumerate DEPOT_GIT_PATHS_ 'PATHS+=("${value}")'
+
+# prepare commands
+GIT_CLONE_CMD=(
+    git
+    clone
+    --no-checkout
+    "${REPO}"
+    "${CLONE_DIR}"
+)
+GIT_DIFF_CMD=(
+    git
+    --git-dir="${CLONE_DIR}/.git"
+    --work-tree="${CHECKOUT_DIR}"
+    diff
+    --quiet
+)
+GIT_FETCH_CMD=(
+    git
+    --git-dir="${CLONE_DIR}/.git"
+    --work-tree="${CHECKOUT_DIR}"
+    fetch
+    --all
+    --prune
+    --prune-tags
+    --tags
+)
+GIT_CHECKOUT_CMD=(
+    git
+    --git-dir="${CLONE_DIR}/.git"
+    --work-tree="${CHECKOUT_DIR}"
+    checkout
+    "${BRANCH:-HEAD}"
+)
+[ ${#PATHS[@]} -gt 0 ] && GIT_CHECKOUT_CMD+=(-- "${PATHS[@]}")
+
+if [ ! -e "${CLONE_DIR}" ]
+then
+    log DEBUG "make directory '${CLONE_DIR}'"
+    run mkdir -p "${CLONE_DIR}"
+fi
+
+if [ ! -e "${CLONE_DIR}/.git" ] || ! is_git_dir "${CLONE_DIR}/.git"
+then
+    log INFO "cloning..."
+    run "${GIT_CLONE_CMD[@]}"
+fi
+
+if [ ! -e "${CHECKOUT_DIR}" ]
+then
+    log DEBUG "make directory '${CHECKOUT_DIR}'"
+    run mkdir -p "${CHECKOUT_DIR}"
+elif ! run "${GIT_DIFF_CMD[@]}"
+then
+    log WARNING "uncommitted changes in repository"
+    exit 1
+fi
+
+log INFO "fetching..."
+run "${GIT_FETCH_CMD[@]}"
+run "${GIT_CHECKOUT_CMD[@]}"
+log INFO 'done'

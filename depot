@@ -1,0 +1,553 @@
+#!/usr/bin/env python
+import argparse
+import os
+import re
+import sys
+
+
+# log severities
+ERROR = 'ERROR'
+WARNING = 'WARNING'
+INFO = 'INFO'
+DEBUG = 'DEBUG'
+TRACE = 'TRACE'
+
+# path formats
+BASENAME = 'basename'
+HOSTPATH = 'hostpath'
+
+# supported APIs
+_APIS = ['v1alpha1']
+
+# subcommands
+_SUBCOMMAND_ENV = 'env'
+_SUBCOMMAND_LOG = 'log'
+_SUBCOMMAND_PATH = 'path'
+_SUBCOMMAND_RUN = 'run'
+
+
+class EnvUtil:
+
+    # prefix
+    PREFIX = 'DEPOT'
+    PREFIX_DELIMITER = '_'
+
+    # quotes
+    DOUBLE_QUOTE = '"'
+    SINGLE_QUOTE = '\''
+
+    def quote(s, char=SINGLE_QUOTE):
+        if char == EnvUtil.DOUBLE_QUOTE:
+            s = re.sub('(")', '\\"', s)
+        elif char == EnvUtil.SINGLE_QUOTE:
+            s = re.sub('(\')', '\'"\'"\'', s)
+        else:
+            raise ValueError(char)
+        return '%s%s%s' % (char, s, char)
+
+    def flatten(o, prefix=PREFIX, prefix_delimiter=PREFIX_DELIMITER):
+        def f1(p, o):
+            r = {}
+            if type(o) is dict:
+                for k, v in o.items():
+                    r.update(f2(p, k, v))
+            elif type(o) is list:
+                for i, v in enumerate(o):
+                    r.update(f2(p, str(i), v))
+            else:
+                raise ValueError('neither dict nor list', o)
+            return r
+
+        def f2(p, k, v):
+            if type(v) is dict or type(v) is list:
+                return f1(EnvUtil.name(k, p, prefix_delimiter), v)
+            else:
+                r = {}
+                r[EnvUtil.name(k, p, prefix_delimiter)] = EnvUtil.value(v)
+                return r
+        return f1(prefix, o)
+
+    def name(s, prefix=PREFIX, prefix_delimiter=PREFIX_DELIMITER):
+        r = re.sub('[^0-9a-zA-Z]', r'_', s).upper()
+        if prefix != '':
+            r = '%s%s%s' % (prefix, prefix_delimiter, r)
+        return r
+
+    def script(env, quote_char=SINGLE_QUOTE):
+        def format(k, v):
+            return '%s=%s' % (k, EnvUtil.quote(EnvUtil.value(v), quote_char))
+        return os.linesep.join(format(k, v) for k, v in env.items())
+
+    def to_bool(s):
+        if s.lower() in ['true', 'yes']:
+            return True
+        elif s.lower() in ['false', 'no', '']:
+            return False
+        else:
+            raise ValueError('could not convert to boolean', s)
+
+    def to_int(s):
+        if len(s) == 0:
+            return 0
+        elif re.match('^-?[1-9]*[0-9]$', s):
+            return int(s)
+        else:
+            raise ValueError('could not convert to integer', s)
+
+    def value(o):
+        if o is None:
+            return ''
+        elif type(o) is bool:
+            if o:
+                return 'yes'
+            else:
+                return 'no'
+        elif type(o) is str:
+            return o
+        else:
+            return str(o)
+
+
+class Logger:
+
+    _COLORS = {
+        ERROR: '\033[0;31m',
+        WARNING: '\033[0;33m',
+        INFO: '\033[0;32m',
+        DEBUG: '\033[0;35m',
+        TRACE: '\033[0;36m'
+    }
+    _COLOR_DEFAULT = '\033[0m'
+    _INITIALS = {
+        ERROR: 'E',
+        WARNING: 'W',
+        INFO: 'I',
+        DEBUG: 'D',
+        TRACE: 'T'
+    }
+    _LEVELS = {
+        ERROR: -2,
+        WARNING: -1,
+        INFO: 0,
+        DEBUG: 1,
+        TRACE: 2
+    }
+
+    def __init__(self, name, level):
+        assert type(name) is str
+        assert type(level) is int
+        self._name = name
+        self._level = level
+
+    def _format(self, severity, line):
+        if len(self._name) > 0:
+            return '%s%s %s %s%s' % (Logger._COLORS[severity],
+                                     Logger._INITIALS[severity],
+                                     self._name,
+                                     line,
+                                     Logger._COLOR_DEFAULT)
+        else:
+            return '%s%s %s%s' % (Logger._COLORS[severity],
+                                  Logger._INITIALS[severity],
+                                  line,
+                                  Logger._COLOR_DEFAULT)
+
+    @property
+    def level(self):
+        return self._level
+
+    def log(self, severity, message):
+        if Logger._LEVELS[severity] > self._level:
+            return
+        print(os.linesep.join(self._format(severity, line)
+                              for line in message.split(os.linesep)),
+              file=sys.stderr)
+
+    @property
+    def name(self):
+        return self._name
+
+
+class PathUtil:
+
+    def resolve(format, name):
+        if format == BASENAME:
+            return os.path.basename(name)
+        elif format == HOSTPATH:
+            return PathUtil._resolve_hostpath(name)
+        else:
+            raise NotImplementedError()
+
+    def _resolve_hostpath(name):
+        if re.match('^[^:/]*://', name):
+            return PathUtil._resolve_hostpath_url(name)
+        else:
+            # same as Git
+            c = name.find(':')
+            s = name.find('/')
+            if c == -1 or (s != -1 and s < c):
+                return name
+            else:
+                return PathUtil._resolve_hostpath_ssh(name)
+
+    def _resolve_hostpath_ssh(name):
+        return PathUtil._resolve_hostpath_url(
+            'ssh://%s' % name.replace(':', '/', 1))
+
+    def _resolve_hostpath_url(name):
+        import urllib.parse
+        url = urllib.parse.urlsplit(name)
+        if url.hostname is not None:
+            return '%s%s' % (url.hostname, url.path)
+        else:
+            return url.path
+
+
+class PluginRepository:
+
+    _PLUGIN_BASENAME_PREFIX = 'depot-'
+
+    def __init__(self, dirnames):
+        assert type(dirnames) is list
+        self._dirnames = [os.path.dirname(
+            os.path.abspath(__file__))] + dirnames
+        self._filenames = {}
+        self._scripts = {}
+
+    def _load(self, filename):
+        with open(filename) as f:
+            return ''.join(f.readlines())
+
+    def _search(self, name):
+        basename = '%s%s' % (PluginRepository._PLUGIN_BASENAME_PREFIX, name)
+
+        def abspath(dirname):
+            if dirname.startswith('/'):
+                return os.path.join(dirname, basename)
+            else:
+                return os.path.join(os.getcwd(), dirname, basename)
+        for filename in map(abspath, self._dirnames):
+            if os.path.isfile(filename):
+                return filename
+        raise RuntimeError('\'%s\' plugin not found' % (name))
+
+    def filename(self, name):
+        if name not in self._filenames.keys():
+            self._filenames[name] = self._search(name)
+        return self._filenames[name]
+
+    def script(self, name):
+        if name not in self._scripts.keys():
+            self._scripts[name] = self._load(self.filename(name))
+        return self._scripts[name]
+
+
+class Runner:
+
+    _MAIN_STEP = 'main'
+    _STEP_METHOD_PREFIX = '_step_'
+    _STEPS = ['api', 'dir', 'env', _MAIN_STEP]
+
+    def __init__(self, context):
+        assert type(context) is RunnerContext
+        self._context = context
+
+    def __getattr__(self, name):
+        if not name.startswith(Runner._STEP_METHOD_PREFIX):
+            raise AttributeError(name)
+        main_step_name = name[len(Runner._STEP_METHOD_PREFIX):]
+        return lambda: self._execute_plugin(main_step_name)
+
+    def _execute_command(self, args, script, env):
+        import subprocess
+        p = subprocess.Popen(args, stdin=subprocess.PIPE, env=env)
+        p.communicate(input=bytes(script.encode('utf-8')))
+
+    def _execute_plugin(self, name):
+        def args(script):
+            shebang = script.split(os.linesep)[0]
+            if not shebang.startswith('#!'):
+                raise ValueError(shebang)
+            return shebang[2:].split(' ')
+        s = self._context.plugins.script(name)
+        c = self._context.subcontext(name)
+        e = {**c.env, **EnvUtil.flatten(c.manifest, EnvUtil.name(name))}
+        self._execute_command(args(s),
+                              os.linesep.join(s.split(os.linesep)[1:]),
+                              e)
+
+    def _main_step_name(self):
+        L = set(self._context.manifest.keys()) - set(Runner._STEPS)
+        if len(L) == 1:
+            return L.pop()
+        elif len(L) == 0:
+            raise KeyError('could not find main step',
+                           self._context.manifest.keys())
+        else:
+            raise KeyError('could not determine main step', L)
+
+    def _step_api(self):
+        api = self._context.manifest['api']
+        if api not in _APIS:
+            raise RuntimeError('API \'%s\' is not supported' % api)
+
+    def _step_async(self):
+        raise NotImplementedError()
+
+    def _step_cmd(self):
+        c = self._context.subcontext('cmd')
+        self._execute_command(args=self._context.shell,
+                              script=c.manifest,
+                              env=c.env)
+
+    def _step_dir(self):
+        d = os.path.join(self._context.dir, self._context.manifest['dir'])
+        self._context.dir = d
+        if not os.path.isdir(d):
+            self._context.logger.log(DEBUG, 'make directory \'%s\'' % (d))
+            if not self._context.dry_run:
+                os.makedirs(d)
+        self._context.logger.log(DEBUG, 'change directory \'%s\'' % (d))
+
+    def _step_env(self):
+        for k, v in self._context.manifest['env'].items():
+            self._context.logger.log(
+                DEBUG, 'export variable \'%s=%s\'' % (k, v))
+            self._context.env[k] = v
+
+    def _step_sync(self):
+        c = self._context.subcontext('sync')
+        for i, v in enumerate(c.manifest):
+            Runner(c.subcontext(i)).run()
+
+    def run(self):
+        self._context.logger.log(TRACE, 'BEGIN')
+        try:
+            for step in Runner._STEPS:
+                if step == Runner._MAIN_STEP:
+                    step_name = self._main_step_name()
+                else:
+                    step_name = step
+                if step_name not in self._context.manifest.keys():
+                    continue
+                getattr(self, '%s%s' %
+                        (Runner._STEP_METHOD_PREFIX, step_name))()
+        except Exception as e:
+            self._context.logger.log(ERROR, 'failed to run')
+            raise e
+        self._context.logger.log(TRACE, 'END')
+
+
+class RunnerContext:
+
+    # environment variables
+    DEPOT_API = 'DEPOT_API'
+    DEPOT_BIN = 'DEPOT_BIN'
+    DEPOT_DIR = 'DEPOT_DIR'
+    DEPOT_DRY_RUN = 'DEPOT_DRY_RUN'
+    DEPOT_LOG_LEVEL = 'DEPOT_LOG_LEVEL'
+    DEPOT_LOG_NAME = 'DEPOT_LOG_NAME'
+    DEPOT_SHELL = 'DEPOT_SHELL'
+
+    def __init__(self, api=None, bin=None, dir=None, dry_run=None, env=None,
+                 logger=None, manifest=None, plugins=None, shell=None):
+        assert type(api) is str
+        assert type(bin) is str
+        assert type(dir) is str
+        assert type(dry_run) is bool
+        assert type(env) is dict
+        assert type(logger) is Logger
+        assert type(manifest) is dict or type(manifest) is list
+        assert type(plugins) is PluginRepository
+        assert type(shell) is str
+        self._env = {
+            **env,
+            RunnerContext.DEPOT_API: api,
+            RunnerContext.DEPOT_BIN: bin,
+            RunnerContext.DEPOT_DIR: dir,
+            RunnerContext.DEPOT_DRY_RUN: EnvUtil.value(args.dry_run),
+            RunnerContext.DEPOT_LOG_LEVEL: EnvUtil.value(logger.level),
+            RunnerContext.DEPOT_LOG_NAME: logger.name,
+            RunnerContext.DEPOT_SHELL: shell
+        }
+        self._logger = logger
+        self._manifest = manifest
+        self._plugins = plugins
+
+    @property
+    def api(self):
+        return self._env[RunnerContext.DEPOT_API]
+
+    @property
+    def bin(self):
+        return self._env[RunnerContext.DEPOT_BIN]
+
+    @property
+    def dir(self):
+        return self._env[RunnerContext.DEPOT_DIR]
+
+    @dir.setter
+    def dir(self, value):
+        self._env[RunnerContext.DEPOT_DIR] = value
+
+    @property
+    def dry_run(self):
+        return EnvUtil.to_bool(self._env[RunnerContext.DEPOT_DRY_RUN])
+
+    @property
+    def env(self):
+        return self._env
+
+    @property
+    def logger(self):
+        return self._logger
+
+    @property
+    def manifest(self):
+        return self._manifest
+
+    @property
+    def plugins(self):
+        return self._plugins
+
+    @property
+    def shell(self):
+        return self._env[RunnerContext.DEPOT_SHELL]
+
+    def subcontext(self, name):
+        def subname():
+            if len(self.logger.name) == 0:
+                return name
+            else:
+                return '%s/%s' % (self.logger.name, name)
+        return RunnerContext(api=self.api,
+                             bin=self.bin,
+                             dir=self.dir,
+                             dry_run=self.dry_run,
+                             env=dict(self._env),
+                             logger=Logger(subname(), self.logger.level),
+                             manifest=self.manifest[name],
+                             plugins=self.plugins,
+                             shell=self.shell)
+
+
+def get_dir(filename):
+    if filename:
+        return os.path.dirname(os.path.abspath(filename))
+    else:
+        return os.getcwd()
+
+
+def get_api(manifest):
+    if 'api' in manifest.keys():
+        return manifest['api']
+    else:
+        return _APIS[-1]
+
+
+def load_manifest(filename):
+    if filename:
+        with open(filename) as f:
+            lines = f.readlines()
+    else:
+        lines = sys.stdin.readlines()
+    import yaml
+    return yaml.load(''.join(lines))
+
+
+def parse_args():
+    def add_arguments(p):
+        p.add_argument('--log-level',
+                       default=0,
+                       type=int,
+                       metavar='LEVEL',
+                       help='set log level',
+                       dest='log_level')
+        p.add_argument('--log-name',
+                       default='',
+                       metavar='NAME',
+                       help='set log name')
+        p.add_argument('-v', '--verbose',
+                       action='count',
+                       help='increase log level',
+                       dest='log_level')
+
+    def add_arguments_env(p):
+        p.add_argument(nargs='?',
+                       help='set manifest filename',
+                       metavar='FILENAME',
+                       dest='filename')
+
+    def add_arguments_log(p):
+        p.add_argument(choices=[ERROR, WARNING, INFO, DEBUG, TRACE],
+                       help='set severity',
+                       metavar='SEVERITY',
+                       dest='severity')
+        p.add_argument(help='set message',
+                       metavar='MESSAGE',
+                       dest='message')
+
+    def add_arguments_path(p):
+        p.add_argument(choices=[BASENAME, HOSTPATH],
+                       help='set format',
+                       metavar='FORMAT',
+                       dest='format')
+        p.add_argument(help='set name',
+                       metavar='NAME',
+                       dest='name')
+
+    def add_arguments_run(p):
+        p.add_argument('-n', '--dry-run',
+                       action='store_true',
+                       default=False,
+                       help='dry run')
+        p.add_argument('-p', '--plugin-directory',
+                       action='append',
+                       default=[],
+                       metavar='DIRECTORY',
+                       help='add plugin directory',
+                       dest='plugin_directories')
+        p.add_argument('-s', '--shell',
+                       default='sh',
+                       metavar='SHELL',
+                       help='set shell')
+        p.add_argument(nargs='?',
+                       help='set manifest filename',
+                       metavar='FILENAME',
+                       dest='filename')
+    p = argparse.ArgumentParser()
+    add_arguments(p)
+    s = p.add_subparsers(dest='subcommand',
+                         help='set type of subcommand')
+    add_arguments_env(s.add_parser(_SUBCOMMAND_ENV))
+    add_arguments_log(s.add_parser(_SUBCOMMAND_LOG))
+    add_arguments_path(s.add_parser(_SUBCOMMAND_PATH))
+    add_arguments_run(s.add_parser(_SUBCOMMAND_RUN))
+    return p.parse_args()
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    logger = Logger(args.log_name, args.log_level)
+    if args.subcommand == _SUBCOMMAND_ENV:
+        manifest = load_manifest(args.filename)
+        print(EnvUtil.script(EnvUtil.flatten(manifest)))
+    elif args.subcommand == _SUBCOMMAND_LOG:
+        logger.log(args.severity, args.message)
+    elif args.subcommand == _SUBCOMMAND_PATH:
+        print(PathUtil.resolve(args.format, args.name))
+    elif args.subcommand == _SUBCOMMAND_RUN:
+        manifest = load_manifest(args.filename)
+        plugins = PluginRepository(args.plugin_directories)
+        context = RunnerContext(api=get_api(manifest),
+                                bin=os.path.abspath(__file__),
+                                dir=get_dir(args.filename),
+                                dry_run=args.dry_run,
+                                env={},
+                                logger=logger,
+                                manifest=manifest,
+                                plugins=plugins,
+                                shell=args.shell)
+        Runner(context).run()
+    else:
+        raise NotImplementedError(args.subcommand)
