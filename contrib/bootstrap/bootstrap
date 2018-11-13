@@ -8,29 +8,22 @@ function abort_if_exists() {
     exit 1
 }
 
-function path() {
-    script | python - path "${@}"
-}
-
-function script() {
-    if [ -z "${SCRIPT:-}" ]
+function fetch_script() {
+    local http_status="$(curl -IL "${1}" | head -n1 | tr -d '\r')"
+    if ! echo "${http_status}" | grep -q '^HTTP/[1-9][0-9.]* 200[^0-9]*'
     then
-        local http_status="$(curl -IL "${SCRIPT_URL}" | head -n1 | tr -d '\r')"
-        if [ "${http_status}" != 'HTTP/1.1 200 OK' ]
-        then
-            echo "${http_status}: unexpected HTTP status" >&2
-            return 1
-        fi
-        SCRIPT="$(curl -L "${SCRIPT_URL}")"
+        echo "${http_status}: unexpected HTTP status" >&2
+        return 1
     fi
-    echo "${SCRIPT}"
+    curl -L "${SCRIPT_URL}"
 }
 
 REPO="${REPO:-https://github.com/t13a/depot}"
 BRANCH="${BRANCH:-master}"
-SCRIPT_URL="${SCRIPT_URL:-${REPO}/blob/${BRANCH}/depot}"
-CLONE_DIR=".depot/vendor/$(path hostpath "${REPO}")"
-CHECKOUT_DIR="vendor/$(path hostpath "${REPO}")"
+SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/t13a/depot/master/depot}"
+SCRIPT="$(fetch_script "${SCRIPT_URL}")"
+CLONE_DIR=".depot/vendor/$(echo "${SCRIPT}" | python - path hostpath "${REPO}")"
+CHECKOUT_DIR="vendor/$(echo "${SCRIPT}" | python - path hostpath "${REPO}")"
 
 abort_if_exists "${CLONE_DIR}"
 abort_if_exists "${CHECKOUT_DIR}"
@@ -57,4 +50,12 @@ EOF
 
 cat << EOF > .gitignore
 .depot
+EOF
+
+cat << EOF
+
+The bootstrap was successful. To update the latest version, execute the following command.
+
+$ cd $(pwd)
+$ ${CHECKOUT_DIR}/depot run .depot.yaml
 EOF
