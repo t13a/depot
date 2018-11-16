@@ -9,53 +9,90 @@ function abort_if_exists() {
 }
 
 function fetch_script() {
-    local http_status="$(curl -IL "${1}" | head -n1 | tr -d '\r')"
+    echo "Checking from '${1}'..." >&2
+    local http_status="$(curl -ILSs "${1}" | head -n1 | tr -d '\r')"
     if ! echo "${http_status}" | grep -q '^HTTP/[1-9][0-9.]* 200[^0-9]*'
     then
         echo "${http_status}: unexpected HTTP status" >&2
         return 1
     fi
-    curl -L "${SCRIPT_URL}"
+    echo "Fetching from '${1}'..." >&2
+    curl -LSs "${1}"
 }
 
 REPO="${REPO:-https://github.com/t13a/depot}"
-BRANCH="${BRANCH:-master}"
-SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/t13a/depot/master/depot}"
-SCRIPT="$(fetch_script "${SCRIPT_URL}")"
-CLONE_DIR=".depot/vendor/$(echo "${SCRIPT}" | python - path hostpath "${REPO}")"
-CHECKOUT_DIR="vendor/$(echo "${SCRIPT}" | python - path hostpath "${REPO}")"
+TAG="${TAG:-v0.2.0}"
+SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/t13a/depot/${TAG}/depot}"
 
-abort_if_exists "${CLONE_DIR}"
+SCRIPT="$(fetch_script "${SCRIPT_URL}")"
+CLONE_DIR=".depot/vendor/$(echo "${SCRIPT}" | python - path hostpath "${REPO%.git}").git"
+CHECKOUT_DIR="vendor/$(echo "${SCRIPT}" | python - path hostpath "${REPO%.git}")"
+LOCK_FILE="${CHECKOUT_DIR}.lock"
+
 abort_if_exists "${CHECKOUT_DIR}"
+abort_if_exists "${CLONE_DIR}"
+abort_if_exists "${LOCK_FILE}"
 abort_if_exists .depot.yaml
-abort_if_exists .gitignore
 
 mkdir -p "${CLONE_DIR}" "${CHECKOUT_DIR}"
-
-git clone --no-checkout "${REPO}" "${CLONE_DIR}"
-
-git --git-dir="${CLONE_DIR}/.git" --work-tree="${CHECKOUT_DIR}" checkout "${BRANCH}"
+git clone --no-progress --mirror "${REPO}" "${CLONE_DIR}"
+git --git-dir="${CLONE_DIR}" symbolic-ref HEAD "refs/tags/${TAG}"
+git --git-dir="${CLONE_DIR}" --work-tree="${CHECKOUT_DIR}" checkout --no-progress --force
+echo $(git --git-dir="${CLONE_DIR}" rev-parse HEAD) > "${LOCK_FILE}"
 
 cat << EOF > .depot.yaml
-api: v1alpha1
+api: v1alpha2
 dir: vendor
 env:
+  DEPOT_FILE_OUT_PREFIX: ../.depot/vendor/
+  DEPOT_FILE_PATH_FORMAT: hostpath
   DEPOT_GIT_CLONE_DIR_PREFIX: ../.depot/vendor/
   DEPOT_GIT_PATH_FORMAT: hostpath
 sync:
+# - sync:
+#   - git:
+#       repo: https://YOUR_DOMAIN/YOUR_REPO
+#   - git:
+#       repo: git@YOUR_DOMAIN:YOUR_REPO
+#       branch: YOUR_BRANCH
+#       paths: [ YOUR_PATH, ... ]
+#   - file:
+#       url: https://YOUR_DOMAIN/YOUR_FILE
+#   - env: { EXT: .tar.gz }
+#     file:
+#       url: https://YOUR_DOMAIN/YOUR_ARCHIVE\${EXT}
+#       post:
+#         cmd: |
+#           DIR="\${OUT%\${EXT}}"
+#           mkdir -p "\${DIR}"
+#           tar -xzf "\${OUT}" -C "\${DIR}"
+#   - env: { EXT: .zip }
+#     file:
+#       url: https://YOUR_DOMAIN/YOUR_ARCHIVE\${EXT}
+#       post:
+#         cmd: |
+#           unzip -d "\${OUT%\${EXT}}" "\${OUT}"
 - git:
     repo: ${REPO}
-    branch: ${BRANCH}
+    tag: ${TAG}
 EOF
 
-cat << EOF > .gitignore
-.depot
+if [ -e .gitignore ]
+then
+    cat << EOF
+
+WARNING: '.gitignore' is already exists. You should add '/.depot' into '.gitignore'.
 EOF
+else
+    cat << EOF > .gitignore
+/.depot
+EOF
+fi
 
 cat << EOF
 
-The bootstrap was successful. To update the latest version, execute the following command.
+The bootstrap was successful. Let's edit '.depot.yaml' and add your own dependencies. To apply all configurations, execute the following command.
 
-$ cd $(pwd)
-$ ${CHECKOUT_DIR}/depot run .depot.yaml
+>>> \$ ${CHECKOUT_DIR}/depot run .depot.yaml
+
 EOF

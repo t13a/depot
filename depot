@@ -17,7 +17,7 @@ BASENAME = 'basename'
 HOSTPATH = 'hostpath'
 
 # supported APIs
-_APIS = ['v1alpha1']
+_APIS = ['v1alpha2']
 
 # subcommands
 _SUBCOMMAND_ENV = 'env'
@@ -258,23 +258,20 @@ class Runner:
         main_step_name = name[len(Runner._STEP_METHOD_PREFIX):]
         return lambda: self._execute_plugin(main_step_name)
 
-    def _execute_command(self, args, script, env):
+    def _execute_command(self, cmd, script, env):
         import subprocess
-        p = subprocess.Popen(args, stdin=subprocess.PIPE, env=env)
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE, env=env)
         p.communicate(input=bytes(script.encode('utf-8')))
+        if p.returncode != 0:
+            raise subprocess.CalledProcessError(returncode=p.returncode,
+                                                cmd=cmd)
 
     def _execute_plugin(self, name):
-        def args(script):
-            shebang = script.split(os.linesep)[0]
-            if not shebang.startswith('#!'):
-                raise ValueError(shebang)
-            return shebang[2:].split(' ')
-        s = self._context.plugins.script(name)
         c = self._context.subcontext(name)
         e = {**c.env, **EnvUtil.flatten(c.manifest, EnvUtil.name(name))}
-        self._execute_command(args(s),
-                              os.linesep.join(s.split(os.linesep)[1:]),
-                              e)
+        import subprocess
+        r = subprocess.run(self._context.plugins.filename(name), env=e)
+        r.check_returncode()
 
     def _main_step_name(self):
         L = set(self._context.manifest.keys()) - set(Runner._STEPS)
@@ -296,7 +293,7 @@ class Runner:
 
     def _step_cmd(self):
         c = self._context.subcontext('cmd')
-        self._execute_command(args=self._context.shell,
+        self._execute_command(cmd=self._context.shell,
                               script=c.manifest,
                               env=c.env)
 
@@ -357,7 +354,7 @@ class RunnerContext:
         assert type(dry_run) is bool
         assert type(env) is dict
         assert type(logger) is Logger
-        assert type(manifest) is dict or type(manifest) is list
+        assert type(manifest) is not None
         assert type(plugins) is PluginRepository
         assert type(shell) is str
         self._env = {

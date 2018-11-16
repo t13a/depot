@@ -14,12 +14,129 @@ function enumerate() {
     done
 }
 
-function is_git_dir() {
-    [ "${DEPOT_DRY_RUN}" == yes ] && return 1
-    (
-        cd "${1}"
-        test "$(git rev-parse --git-dir)" == .
+function get_commit_in_head() {
+    if [ "${DEPOT_DRY_RUN}" == yes ]
+    then
+        echo "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    else
+        git_rev_parse HEAD
+    fi
+}
+
+function get_commit_in_lock() {
+    if [ -e "${LOCK_FILE}" ]
+    then
+        cat "${LOCK_FILE}"
+    fi
+}
+
+function git_add() {
+    local args=(
+        git
+        --git-dir="${CLONE_DIR}"
+        --work-tree="${CHECKOUT_DIR}"
+        add
+        "${@}"
     )
+    [ ${#PATHS[@]} -gt 0 ] && args+=(-- "${PATHS[@]}")
+    run "${args[@]}"
+}
+
+function git_checkout() {
+    local args=(
+        git
+        --git-dir="${CLONE_DIR}"
+        --work-tree="${CHECKOUT_DIR}"
+        checkout
+        "${@}"
+    )
+    [ ${#PATHS[@]} -gt 0 ] && args+=(-- "${PATHS[@]}")
+    run "${args[@]}"
+}
+
+function git_clean() {
+    local args=(
+        git
+        --git-dir="${CLONE_DIR}"
+        --work-tree="${CHECKOUT_DIR}"
+        clean
+        "${@}"
+    )
+    [ ${#PATHS[@]} -gt 0 ] && args+=(-- "${PATHS[@]}")
+    run "${args[@]}"
+}
+
+function git_clone() {
+    local args=(
+        git
+        clone
+        "${@}"
+    )
+    run "${args[@]}"
+}
+
+function git_diff() {
+    local args=(
+        git
+        --no-pager
+        --git-dir="${CLONE_DIR}"
+        --work-tree="${CHECKOUT_DIR}"
+        diff
+        "${@}"
+    )
+    [ ${#PATHS[@]} -gt 0 ] && args+=(-- "${PATHS[@]}")
+    run "${args[@]}"
+}
+
+function git_remote() {
+    local args=(
+        git
+        --git-dir="${CLONE_DIR}"
+        remote
+        "${@}"
+    )
+    run "${args[@]}"
+}
+
+function git_reset() {
+    local args=(
+        git
+        --git-dir="${CLONE_DIR}"
+        --work-tree="${CHECKOUT_DIR}"
+        reset
+        "${@}"
+    )
+    [ ${#PATHS[@]} -gt 0 ] && args+=(-- "${PATHS[@]}")
+    run "${args[@]}"
+}
+
+function git_rev_parse() {
+    local args=(
+        git
+        --git-dir="${CLONE_DIR}"
+        rev-parse
+        "${@}"
+    )
+    run "${args[@]}"
+}
+
+function git_symbolic_ref() {
+    local args=(
+        git
+        --git-dir="${CLONE_DIR}"
+        symbolic-ref
+        "${@}"
+    )
+    run "${args[@]}"
+}
+
+function is_git_dir() {
+    if [ "${DEPOT_DRY_RUN}" == yes ]
+    then
+        return 1
+    else
+        test "$(git_rev_parse --git-dir)" == "${CLONE_DIR}"
+    fi
 }
 
 function log() {
@@ -32,7 +149,7 @@ function log() {
 }
 
 function path() {
-    "${DEPOT_BIN}" path "${DEPOT_URL_PATH_FORMAT:-basename}" "${1}"
+    "${DEPOT_BIN}" path "${DEPOT_GIT_PATH_FORMAT:-basename}" "${1}"
 }
 
 function run() {
@@ -48,64 +165,55 @@ export DEPOT_GIT_CHECKOUT_DIR_SUFFIX="$(echo "${DEPOT_GIT_CHECKOUT_DIR_SUFFIX:-}
 export DEPOT_GIT_CLONE_DIR="$(echo "${DEPOT_GIT_CLONE_DIR:-}" | envsubst)"
 export DEPOT_GIT_CLONE_DIR_PREFIX="$(echo "${DEPOT_GIT_CLONE_DIR_PREFIX:-}" | envsubst)"
 export DEPOT_GIT_CLONE_DIR_SUFFIX="$(echo "${DEPOT_GIT_CLONE_DIR_SUFFIX:-}" | envsubst)"
+export DEPOT_GIT_LOCK_FILE="$(echo "${DEPOT_GIT_LOCK_FILE:-}" | envsubst)"
+export DEPOT_GIT_LOCK_FILE_PREFIX="$(echo "${DEPOT_GIT_LOCK_FILE_PREFIX:-}" | envsubst)"
+export DEPOT_GIT_LOCK_FILE_SUFFIX="$(echo "${DEPOT_GIT_LOCK_FILE_SUFFIX:-}" | envsubst)"
+export DEPOT_GIT_NO_CLEAN="$(echo "${DEPOT_GIT_NO_CLEAN:-}" | envsubst)"
+export DEPOT_GIT_NO_LOCK="$(echo "${DEPOT_GIT_NO_LOCK:-}" | envsubst)"
 export DEPOT_GIT_PATH_FORMAT="$(echo "${DEPOT_GIT_PATH_FORMAT:-}" | envsubst)"
+export DEPOT_GIT_REF="$(echo "${DEPOT_GIT_REF:-}" | envsubst)"
 export DEPOT_GIT_REPO="$(echo "${DEPOT_GIT_REPO}" | envsubst)"
+export DEPOT_GIT_TAG="$(echo "${DEPOT_GIT_TAG:-}" | envsubst)"
 enumerate DEPOT_GIT_PATHS_ 'export "${name}=$(echo "${value}" | envsubst)"'
 log TRACE "$(env | grep '^DEPOT_' | sort)"
 
 # prepare variables
 REPO="${DEPOT_GIT_REPO}"
-BRANCH="${DEPOT_GIT_BRANCH:-}"
+if [ -n "${DEPOT_GIT_REF}" ]
+then
+    REF="${DEPOT_GIT_REF}"
+elif [ -n "${DEPOT_GIT_TAG}" ]
+then
+    REF="refs/tags/${DEPOT_GIT_TAG}"
+elif [ -n "${DEPOT_GIT_BRANCH}" ]
+then
+    REF="refs/heads/${DEPOT_GIT_BRANCH}"
+else
+    REF=""
+fi
 CLONE_DIR="$(
     printf '%s/%s%s%s' \
     "${DEPOT_DIR}" \
     "${DEPOT_GIT_CLONE_DIR_PREFIX}" \
-    "${DEPOT_GIT_CLONE_DIR:-$(path "${REPO}")}" \
-    "${DEPOT_GIT_CLONE_DIR_SUFFIX}"
+    "${DEPOT_GIT_CLONE_DIR:-$(path "${REPO%.git}")}" \
+    "${DEPOT_GIT_CLONE_DIR_SUFFIX:-.git}"
 )"
 CHECKOUT_DIR="$(
     printf '%s/%s%s%s' \
     "${DEPOT_DIR}" \
     "${DEPOT_GIT_CHECKOUT_DIR_PREFIX}" \
-    "${DEPOT_GIT_CHECKOUT_DIR:-$(path "${REPO}")}" \
+    "${DEPOT_GIT_CHECKOUT_DIR:-$(path "${REPO%.git}")}" \
     "${DEPOT_GIT_CHECKOUT_DIR_SUFFIX}"
+)"
+LOCK_FILE="$(
+    printf '%s/%s%s%s' \
+    "${DEPOT_DIR}" \
+    "${DEPOT_GIT_LOCK_FILE_PREFIX}" \
+    "${DEPOT_GIT_LOCK_FILE:-$(path "${REPO%.git}")}" \
+    "${DEPOT_GIT_LOCK_FILE_SUFFIX:-.lock}"
 )"
 PATHS=()
 enumerate DEPOT_GIT_PATHS_ 'PATHS+=("${value}")'
-
-# prepare commands
-GIT_CLONE_CMD=(
-    git
-    clone
-    --no-checkout
-    "${REPO}"
-    "${CLONE_DIR}"
-)
-GIT_DIFF_CMD=(
-    git
-    --git-dir="${CLONE_DIR}/.git"
-    --work-tree="${CHECKOUT_DIR}"
-    diff
-    --quiet
-)
-GIT_FETCH_CMD=(
-    git
-    --git-dir="${CLONE_DIR}/.git"
-    --work-tree="${CHECKOUT_DIR}"
-    fetch
-    --all
-    --prune
-    --prune-tags
-    --tags
-)
-GIT_CHECKOUT_CMD=(
-    git
-    --git-dir="${CLONE_DIR}/.git"
-    --work-tree="${CHECKOUT_DIR}"
-    checkout
-    "${BRANCH:-HEAD}"
-)
-[ ${#PATHS[@]} -gt 0 ] && GIT_CHECKOUT_CMD+=(-- "${PATHS[@]}")
 
 if [ ! -e "${CLONE_DIR}" ]
 then
@@ -113,23 +221,53 @@ then
     run mkdir -p "${CLONE_DIR}"
 fi
 
-if [ ! -e "${CLONE_DIR}/.git" ] || ! is_git_dir "${CLONE_DIR}/.git"
+if ! is_git_dir "${CLONE_DIR}"
 then
     log INFO "cloning..."
-    run "${GIT_CLONE_CMD[@]}"
+    git_clone --mirror "${REPO}" "${CLONE_DIR}"
 fi
 
 if [ ! -e "${CHECKOUT_DIR}" ]
 then
     log DEBUG "make directory '${CHECKOUT_DIR}'"
     run mkdir -p "${CHECKOUT_DIR}"
-elif ! run "${GIT_DIFF_CMD[@]}"
-then
-    log WARNING "uncommitted changes in repository"
-    exit 1
+else
+    git_add --all
+
+    if [ "${DEPOT_GIT_NO_LOCK}" != yes -a -e "${LOCK_FILE}" ]
+    then
+        COMMIT="$(get_commit_in_lock)"
+    else
+        COMMIT="$(get_commit_in_head)"
+    fi
+    if ! git_diff --compact-summary --color --exit-code --cached "${COMMIT}"
+    then
+        log WARNING "found changes in '${CHECKOUT_DIR}'"
+        exit 1
+    fi
 fi
 
 log INFO "fetching..."
-run "${GIT_FETCH_CMD[@]}"
-run "${GIT_CHECKOUT_CMD[@]}"
+git_remote update --prune
+
+if [ -n "${REF}" -a "${REF}" != "$(git_symbolic_ref HEAD)" ]
+then
+    log DEBUG "change HEAD from '$(git_symbolic_ref HEAD)' to '${REF}'"
+    git_symbolic_ref HEAD "${REF}"
+fi
+
+if [ "${DEPOT_GIT_NO_LOCK}" != yes ]
+then
+    COMMIT_IN_LOCK="$(get_commit_in_lock)"
+    COMMIT_IN_HEAD="$(get_commit_in_head)"
+    if [ "${COMMIT_IN_LOCK}" != "${COMMIT_IN_HEAD}" ]
+    then
+        log DEBUG "update lock file '${LOCK_FILE}'"
+        [ "${DEPOT_DRY_RUN}" != yes ] && echo "${COMMIT_IN_HEAD}" > "${LOCK_FILE}"
+    fi
+fi
+
+git_reset
+[ "${DEPOT_GIT_NO_CLEAN}" != yes ] && git_clean -d --force
+git_checkout --force
 log INFO 'done'

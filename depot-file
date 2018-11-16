@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+function log() {
+    "${DEPOT_BIN}" \
+    --log-level="${DEPOT_LOG_LEVEL}" \
+    --log-name="${DEPOT_LOG_NAME}" \
+    log \
+    "${1}" \
+    "${*:2}"
+}
+
+function path() {
+    "${DEPOT_BIN}" path "${DEPOT_FILE_PATH_FORMAT:-basename}" "${1}"
+}
+
+function run() {
+    log TRACE "${*}"
+    [ "${DEPOT_DRY_RUN}" == yes ] || "${@}"
+}
+
+# replace environment variables (except 'DEPOT_FILE_POST_CMD')
+export DEPOT_FILE_URL="$(echo "${DEPOT_FILE_URL}" | envsubst)"
+export DEPOT_FILE_URL_PREFIX="$(echo "${DEPOT_FILE_URL_PREFIX:-}" | envsubst)"
+export DEPOT_FILE_URL_SUFFIX="$(echo "${DEPOT_FILE_URL_SUFFIX:-}" | envsubst)"
+export DEPOT_FILE_OUT="$(echo "${DEPOT_FILE_OUT:-}" | envsubst)"
+export DEPOT_FILE_OUT_PREFIX="$(echo "${DEPOT_FILE_OUT_PREFIX:-}" | envsubst)"
+export DEPOT_FILE_OUT_SUFFIX="$(echo "${DEPOT_FILE_OUT_SUFFIX:-}" | envsubst)"
+export DEPOT_FILE_PART_SUFFIX="$(echo "${DEPOT_FILE_PART_SUFFIX:-}" | envsubst)"
+export DEPOT_FILE_PATH_FORMAT="$(echo "${DEPOT_FILE_PATH_FORMAT}" | envsubst)"
+log TRACE "$(env | grep '^DEPOT_' | sort)"
+
+# prepare variables
+export URL="$(
+    printf '%s%s%s' \
+    "${DEPOT_FILE_URL_PREFIX:-}" \
+    "${DEPOT_FILE_URL}" \
+    "${DEPOT_FILE_URL_SUFFIX:-}"
+)"
+export OUT="$(
+    printf '%s/%s%s%s' \
+    "${DEPOT_DIR}" \
+    "${DEPOT_FILE_OUT_PREFIX:-}" \
+    "${DEPOT_FILE_OUT:-$(path "${URL}")}" \
+    "${DEPOT_FILE_OUT_SUFFIX:-}"
+)"
+PART="${OUT}${DEPOT_FILE_PART_SUFFIX:-.part}"
+
+# prepare commands
+CURL_CMD=(
+    curl
+    --create-dirs
+    --location
+    --output "${PART}"
+    --url "${URL}"
+)
+MV_CMD=(
+    mv
+    "${PART}"
+    "${OUT}"
+)
+BASH_CMD=(
+    bash
+    -c
+    "$(cat << EOF
+set -euo pipefail
+cd '${DEPOT_DIR}'
+${DEPOT_FILE_POST_CMD:-}
+EOF
+    )"
+)
+
+if [ -e "${OUT}" ]
+then
+    log INFO "already exists"
+    exit 0
+fi
+
+log INFO "fetching..."
+run "${CURL_CMD[@]}"
+run "${MV_CMD[@]}"
+
+if [ -n "${DEPOT_FILE_POST_CMD:-}" ]
+then
+    log DEBUG "post processing..."
+    run "${BASH_CMD[@]}"
+fi
+
+log INFO 'done'
