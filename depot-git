@@ -240,7 +240,7 @@ else
     else
         COMMIT="$(get_commit_in_head)"
     fi
-    if ! git_diff --compact-summary --color --exit-code --cached "${COMMIT}"
+    if ! git_diff --color --exit-code --cached "${COMMIT}"
     then
         log WARNING "found changes in '${CHECKOUT_DIR}'"
         exit 1
